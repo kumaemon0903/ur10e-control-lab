@@ -1,0 +1,24 @@
+# ros2_control の設定
+# 制御則は Python の lab_node 側で計算し、ここでは
+#   - joint_state_broadcaster : 関節角・角速度を /joint_states に流す
+#   - effort_controller       : /effort_controller/commands で受けたトルクをそのまま関節に入れる
+# だけを行う（制御理論の中身はすべて Python 側にある）。
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # [Hz] 制御周期 2 ms
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    effort_controller:
+      type: effort_controllers/JointGroupEffortController
+
+effort_controller:
+  ros__parameters:
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint

@@ -1,0 +1,96 @@
+<?xml version="1.0"?>
+<!--
+  UR10e 制御学習用モデル
+  - ur_description の公式モデルをそのまま利用
+  - 手先 (tool0) に「負荷 (payload)」を追加: 制御器側のモデルは負荷を知らない → モデル誤差の題材
+  - sim_gazebo:=true のとき、gz_ros2_control で全関節を「トルク(effort)指令」で動かす
+-->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="ur">
+  <xacro:arg name="payload_mass" default="5.0"/>
+  <xacro:arg name="sim_gazebo" default="false"/>
+  <xacro:arg name="controllers_file" default=""/>
+  <xacro:arg name="force_abs_paths" default="false"/>
+
+  <xacro:include filename="$(find ur_description)/urdf/ur_macro.xacro"/>
+
+  <xacro:property name="ur_type" value="ur10e"/>
+  <xacro:property name="payload_mass" value="$(arg payload_mass)"/>
+  <!-- 初期姿勢 [rad]（lab_params.yaml の home と一致させる） -->
+  <xacro:property name="initial_positions"
+                  value="${dict(shoulder_pan_joint=0.0, shoulder_lift_joint=-1.5708, elbow_joint=1.5708,
+                                wrist_1_joint=-1.5708, wrist_2_joint=-1.5708, wrist_3_joint=0.0)}"/>
+  <!-- ur10e の定格トルク [Nm] -->
+  <xacro:property name="effort_limits"
+                  value="${dict(shoulder_pan_joint=330.0, shoulder_lift_joint=330.0, elbow_joint=150.0,
+                                wrist_1_joint=54.0, wrist_2_joint=54.0, wrist_3_joint=54.0)}"/>
+
+  <link name="world"/>
+
+  <xacro:ur_robot
+    name="ur"
+    tf_prefix=""
+    parent="world"
+    joint_limits_parameters_file="$(find ur_description)/config/${ur_type}/joint_limits.yaml"
+    kinematics_parameters_file="$(find ur_description)/config/${ur_type}/default_kinematics.yaml"
+    physical_parameters_file="$(find ur_description)/config/${ur_type}/physical_parameters.yaml"
+    visual_parameters_file="$(find ur_description)/config/${ur_type}/visual_parameters.yaml"
+    force_abs_paths="$(arg force_abs_paths)">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:ur_robot>
+
+  <!-- ===== 手先負荷 (tool0 から z 方向 0.1 m に質点的な重り) ===== -->
+  <xacro:if value="${payload_mass > 0.0}">
+    <link name="payload">
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="${payload_mass}"/>
+        <!-- 一辺 0.1 m の立方体相当 -->
+        <inertia ixx="${payload_mass*0.01/6}" iyy="${payload_mass*0.01/6}" izz="${payload_mass*0.01/6}"
+                 ixy="0" ixz="0" iyz="0"/>
+      </inertial>
+      <visual>
+        <geometry><box size="0.1 0.1 0.1"/></geometry>
+        <material name="payload_orange"><color rgba="1.0 0.5 0.0 1.0"/></material>
+      </visual>
+    </link>
+    <joint name="tool0-payload" type="fixed">
+      <parent link="tool0"/>
+      <child link="payload"/>
+      <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    </joint>
+  </xacro:if>
+
+  <!-- ===== Gazebo / ros2_control 設定 ===== -->
+  <xacro:if value="$(arg sim_gazebo)">
+    <ros2_control name="GazeboSimSystem" type="system">
+      <hardware>
+        <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+      </hardware>
+      <xacro:macro name="effort_joint" params="name">
+        <joint name="${name}">
+          <command_interface name="effort">
+            <param name="min">${-effort_limits[name]}</param>
+            <param name="max">${effort_limits[name]}</param>
+          </command_interface>
+          <state_interface name="position">
+            <param name="initial_value">${initial_positions[name]}</param>
+          </state_interface>
+          <state_interface name="velocity"/>
+          <state_interface name="effort"/>
+        </joint>
+      </xacro:macro>
+      <xacro:effort_joint name="shoulder_pan_joint"/>
+      <xacro:effort_joint name="shoulder_lift_joint"/>
+      <xacro:effort_joint name="elbow_joint"/>
+      <xacro:effort_joint name="wrist_1_joint"/>
+      <xacro:effort_joint name="wrist_2_joint"/>
+      <xacro:effort_joint name="wrist_3_joint"/>
+    </ros2_control>
+
+    <gazebo>
+      <plugin filename="gz_ros2_control-system" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+        <parameters>$(arg controllers_file)</parameters>
+      </plugin>
+    </gazebo>
+  </xacro:if>
+</robot>

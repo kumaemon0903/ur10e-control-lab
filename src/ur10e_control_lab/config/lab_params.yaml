@@ -1,0 +1,195 @@
+# =============================================================================
+#  UR10e 制御学習ラボ パラメータ
+#  - このファイルを編集して `ros2 service call /control_lab/reload std_srvs/srv/Trigger`
+#    を呼ぶと、Gazebo を再起動せずにゲインを反映できる
+#    （lab_node はソースツリーのこのファイルを直接読むので、再ビルドは不要）
+#  - 関節ごとの値は [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3] の順
+# =============================================================================
+
+# 初期姿勢 / hold の目標 [rad]（urdf の initial_positions と合わせる）
+home: [0.0, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
+
+# 制御器が「知っている」手先負荷の質量 [kg]（model_payload_mass）
+#   既定では「実際の負荷と同じ」= モデルが正確。負荷を知らない制御器（モデル誤差あり）にするには:
+#     Gazebo 起動時:  ros2 launch ur10e_control_lab lab.launch.py model_payload_mass:=0.0
+#     Gazebo 実行中:  ros2 param set /control_lab model_payload_mass 0.0
+#     オフライン:     ros2 run ur10e_control_lab offline_sim ... --set model_payload_mass=0.0
+#   ※ 制御器ごとの model_payload_mass（sliding_mode, adaptive など）はこれより優先
+
+# トルク上限 = UR10e 定格トルク × この係数（小さくすると飽和の影響を観察しやすい）
+torque_limit_scale: 1.0
+
+# ---- センサモデル（制御器が受け取る測定値に加えるノイズ）----
+sensor:
+  position_noise_std: 0.0     # [rad]   例: 0.001 (≈ 0.06°)
+  velocity_noise_std: 0.0     # [rad/s]
+  seed: 0
+
+# ---- 状態推定器 ----
+estimator:
+  type: none                  # none: 測定値をそのまま使う / diff: 差分+ローパス / kf: カルマンフィルタ
+  diff:
+    cutoff_hz: 20.0
+  kf:
+    process_noise_accel: 20.0          # [rad/s²] モデル加速度の不確かさ（大 → センサを信じる）
+    measurement_noise_position: 0.001  # [rad]    センサノイズの標準偏差（大 → モデルを信じる）
+    use_model_acceleration: true       # false にすると等速モデル（モデルを使わない KF）
+
+# ---- 目標軌道 ----
+references:
+  hold: {}
+  step:
+    amplitude: [0.3, 0.3, 0.3, 0.3, 0.3, 0.3]   # [rad]
+    period: 4.0                                  # [s] この間隔で home と home+amplitude を往復
+  quintic:
+    amplitude: [0.8, -0.5, 0.6, 0.6, 0.6, 1.0]
+    move_time: 2.0
+    dwell: 1.0
+  sine:
+    amplitude: [0.4, 0.3, 0.3, 0.4, 0.4, 0.5]
+    frequency: [0.2, 0.25, 0.3, 0.35, 0.4, 0.45]  # [Hz]
+  circle:
+    radius: 0.15        # [m]
+    frequency: 0.2      # [Hz]
+    plane: yz           # xy / yz / xz
+    ramp: 2.0           # [s] 半径を徐々に大きくする時間
+
+# ---- 制御器（キー名 = ros2 param set /control_lab controller <キー名>）----
+#   type を書くと、同じ実装を別パラメータで登録できる（下の pid_p_only など）
+controllers:
+
+  # [1] 独立関節 PID（モデル不使用）
+  pid:
+    kp: [1300, 2400, 1200, 80, 60, 2.0]        # [Nm/rad]
+    ki: [2000, 4000, 2000, 100, 80, 3.0]       # [Nm/(rad·s)]
+    kd: [120, 220, 110, 7.0, 5.0, 0.15]        # [Nm·s/rad]
+    anti_windup: conditional                   # conditional / clamp / none
+    integral_limit: [100, 200, 100, 20, 20, 5] # [Nm] I 項の上限
+    gravity_compensation: false
+  pid_p_only:          # I も D もない P 制御: 定常偏差と振動を観察する
+    type: pid
+    kp: [1300, 2400, 1200, 80, 60, 2.0]
+    ki: 0.0
+    kd: [30, 50, 25, 1.5, 1.0, 0.02]           # D がほぼない（完全に 0 だと振動が収まらない）
+  pid_no_antiwindup:   # アンチワインドアップなし（torque_limit_scale を下げると差が出やすい）
+    type: pid
+    kp: [1300, 2400, 1200, 80, 60, 2.0]
+    ki: [2000, 4000, 2000, 100, 80, 3.0]
+    kd: [120, 220, 110, 7.0, 5.0, 0.15]
+    anti_windup: none
+
+  # [2] PD + 重力補償
+  pd_gravity:
+    kp: [1300, 2400, 1200, 80, 60, 2.0]
+    kd: [120, 220, 110, 7.0, 5.0, 0.15]
+
+  # [3] 計算トルク法: 誤差ダイナミクス ë + 2ζωn ė + ωn² e = 0
+  computed_torque:
+    wn: 20.0       # [rad/s] 固有角振動数（大きいほど速い）
+    zeta: 1.0      # 減衰比（1 = 臨界減衰）
+    feedforward: true   # 目標加速度 q̈_ref のフィードフォワード
+  computed_torque_no_model:   # モデルが負荷を知らない場合
+    type: computed_torque
+    model_payload_mass: 0.0
+    wn: 20.0
+    zeta: 1.0
+
+  # [4] LQR
+  lqr:
+    mode: feedback_linearized   # feedback_linearized / linearized_model
+    q_integral: 8000.0          # 積分誤差の重み（0 で積分なし）
+    q_position: 400.0           # 位置誤差の重み
+    q_velocity: 1.0             # 速度誤差の重み
+    r: 0.001                    # 入力（加速度）の重み
+  lqr_linearized:
+    type: lqr
+    mode: linearized_model
+    q_position: [4.0e6, 4.0e6, 4.0e6, 1.0e5, 1.0e5, 1.0e3]
+    q_velocity: [1.0e4, 1.0e4, 1.0e4, 50.0, 50.0, 0.5]
+    r: 1.0                      # 入力（トルク）の重み
+    relinearize_period: 0.1     # [s]
+    relinearize_threshold: 0.05 # [rad]
+
+  # [5] スライディングモード（負荷を知らないモデル + ロバスト項）
+  sliding_mode:
+    model_payload_mass: 0.0
+    lambda: 10.0                       # 滑り面の傾き [1/s]
+    kd: [100, 200, 100, 10, 5, 0.2]
+    eta: [30, 60, 30, 8, 4, 0.5]       # 不連続項の大きさ [Nm]
+    boundary_layer: 0.05               # 境界層 φ [rad/s]（0 = sign 関数 → チャタリング）
+  sliding_mode_chattering:
+    type: sliding_mode
+    model_payload_mass: 0.0
+    lambda: 10.0
+    kd: [100, 200, 100, 10, 5, 0.2]
+    eta: [30, 60, 30, 8, 4, 0.5]
+    boundary_layer: 0.0
+
+  # [6] 適応制御（負荷質量をオンライン推定）
+  adaptive:
+    model_payload_mass: 0.0
+    lambda: 5.0
+    kd: [100, 200, 100, 10, 5, 0.2]
+    gamma: 5.0                    # 適応ゲイン Γ
+    payload_offset: [0, 0, 0.1]   # tool0 から見た負荷重心 [m]
+    m_hat_init: 0.0
+    m_hat_bounds: [0.0, 20.0]
+
+  # [7] タスク空間インピーダンス制御
+  impedance:
+    stiffness_translational: [1500, 1500, 1500]  # [N/m]  x, y, z
+    stiffness_rotational: [50, 50, 50]           # [Nm/rad]
+    damping_ratio: 1.0                           # D は手先慣性 Λ(q) から毎周期計算
+    use_dynamics: true                           # false: τ = JᵀF + g（慣性補償なし）
+    joint_damping: 0.5
+  impedance_soft_z:   # z 方向だけ柔らかい
+    type: impedance
+    stiffness_translational: [1500, 1500, 150]
+    stiffness_rotational: [50, 50, 50]
+    damping_ratio: 1.0
+    use_dynamics: true
+    joint_damping: 0.5
+
+  # [8] モデル予測制御
+  mpc:
+    horizon: 25            # 予測ステップ数
+    dt: 0.02               # [s] 予測の刻み（horizon × dt = 0.5 s 先まで予測）
+    w_position: 1000.0
+    w_velocity: 10.0
+    r: 0.01                # 入力（加速度）の重み
+    accel_limit: [3.0, 3.0, 5.0, 8.0, 8.0, 8.0]      # [rad/s²]
+    velocity_limit: [1.0, 1.0, 1.5, 2.0, 2.0, 2.0]   # [rad/s]
+    preview: true          # 目標軌道の先読み
+    disturbance_observer: true   # 外乱（モデル誤差）加速度を推定して補償
+    dob_cutoff_hz: 5.0
+    admm_iterations: 40
+  mpc_no_preview:
+    type: mpc
+    horizon: 25
+    dt: 0.02
+    w_position: 1000.0
+    w_velocity: 10.0
+    r: 0.01
+    accel_limit: [3.0, 3.0, 5.0, 8.0, 8.0, 8.0]
+    velocity_limit: [1.0, 1.0, 1.5, 2.0, 2.0, 2.0]
+    preview: false
+  mpc_no_dob:          # 外乱オブザーバなし（model_payload_mass: 0.0 と組み合わせて試す）
+    type: mpc
+    horizon: 25
+    dt: 0.02
+    w_position: 1000.0
+    w_velocity: 10.0
+    r: 0.01
+    accel_limit: [3.0, 3.0, 5.0, 8.0, 8.0, 8.0]
+    velocity_limit: [1.0, 1.0, 1.5, 2.0, 2.0, 2.0]
+    disturbance_observer: false
+
+  # [演習] 自作の制御器（controllers/template.py を編集する）
+  my_controller:
+    type: template
+    kp: [1300, 2400, 1200, 80, 60, 2.0]
+    kd: [120, 220, 110, 7.0, 5.0, 0.15]
+
+# ---- ログ ----
+log:
+  csv_dir: ~/ur10e_lab_logs   # ros2 param set /control_lab record true で CSV 保存
